@@ -1,29 +1,29 @@
+from pathlib import Path
 import pickle
 import sys
-import time
-from pathlib import Path
 from threading import Event
-
-import numpy as np
-import pandas as pd
-import matplotlib
-matplotlib.use("TkAgg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import time
 import tkinter as tk
 from tkinter import ttk
+
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 project_dir = Path(__file__).resolve().parent
 if str(project_dir) not in sys.path:
     sys.path.insert(0, str(project_dir))
 
 from realtime_demo import RealTimeRiskMonitor, read_live_system_metrics
-
-from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 
 
 class LiveMonitorApp:
+
     def __init__(self, root):
         self.root = root
         self.root.title("Live Fan Risk Monitor")
@@ -41,16 +41,57 @@ class LiveMonitorApp:
         self.risk_scores = []
         self.log_lines = []
 
-        self._build_ui()
         self._prepare_model()
+        
+        self._build_ui()
+        
+        self.log("Đã tải mô hình Random Forest calibrate từ demo.ipynb.")
+        self.log(
+            f"Ngưỡng rủi ro (Risk Threshold) thiết lập ở: {self.threshold:.2f}"
+        )
+        
         self.start_monitoring()
 
+    def _prepare_model(self):
+        artifact_path = project_dir / "trained_models.pkl"
+        if not artifact_path.exists():
+            raise FileNotFoundError(
+                "Không tìm thấy trained_models.pkl. Hãy chạy lại các cell huấn luyện trong demo.ipynb trước khi chạy app.py."
+            )
+
+        with artifact_path.open("rb") as f:
+            payload = pickle.load(f)
+
+        self.model = payload.get("rf_calibrated", payload.get("model"))
+        self.scaler = payload["scaler"]
+        self.feature_names = payload.get("feature_names", [])
+        self.raw_feature_names = payload.get("raw_feature_names", [])
+
+        self.threshold = payload.get("threshold", 0.54)
+
+        self.monitor = RealTimeRiskMonitor(
+            model=self.model,
+            scaler=self.scaler,
+            feature_names=self.feature_names,
+            raw_feature_names=self.raw_feature_names,
+            threshold=self.threshold,
+            window_size=10,
+        )
     def _build_ui(self):
         top = ttk.Frame(self.root, padding=10)
         top.pack(fill="x")
 
-        ttk.Label(top, text="Live Fan Risk Monitor", font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        ttk.Label(top, text="Nhấn ` hoặc q để dừng. Chạy liên tục cho đến khi bạn dừng thủ công.", font=("Segoe UI", 10)).pack(anchor="w")
+        ttk.Label(
+            top, text="Live Fan Risk Monitor", font=("Segoe UI", 16, "bold")
+        ).pack(anchor="w")
+        ttk.Label(
+            top,
+            text=(
+                "Nhấn ` hoặc q để dừng. Chạy liên tục cho đến khi bạn dừng"
+                " thủ công."
+            ),
+            font=("Segoe UI", 10),
+        ).pack(anchor="w")
 
         controls = ttk.Frame(top)
         controls.pack(fill="x", pady=(6, 0))
@@ -58,10 +99,28 @@ class LiveMonitorApp:
         self.latest_state_var = tk.StringVar(value="State: --")
         self.latest_score_var = tk.StringVar(value="Score: --")
 
-        ttk.Label(controls, textvariable=self.status_var, foreground="#1f4e79").pack(side="left")
-        ttk.Label(controls, textvariable=self.latest_state_var, foreground="#0b6e4f", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(18, 6))
-        ttk.Label(controls, textvariable=self.latest_score_var, foreground="#8a2be2", font=("Segoe UI", 10, "bold")).pack(side="left")
-        ttk.Button(controls, text="Dừng", command=self.stop_monitoring).pack(side="right")
+        ttk.Label(
+            controls, textvariable=self.status_var, foreground="#1f4e79"
+        ).pack(side="left")
+
+        # Nhãn trạng thái (màu động theo state)
+        self.state_label = ttk.Label(
+            controls,
+            textvariable=self.latest_state_var,
+            foreground="#0b6e4f",
+            font=("Segoe UI", 10, "bold"),
+        )
+        self.state_label.pack(side="left", padx=(18, 6))
+
+        ttk.Label(
+            controls,
+            textvariable=self.latest_score_var,
+            foreground="#8a2be2",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left")
+        ttk.Button(
+            controls, text="Dừng", command=self.stop_monitoring
+        ).pack(side="right")
 
         body = ttk.Frame(self.root, padding=(10, 0, 10, 10))
         body.pack(fill="both", expand=True)
@@ -74,44 +133,35 @@ class LiveMonitorApp:
         self.canvas = FigureCanvasTkAgg(self.figure, master=left)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
-        self.line, = self.ax.plot([], [], color="#1f77b4", linewidth=2, label="Risk score")
-        self.ax.axhline(0.5, color="red", linestyle="--", linewidth=1.2, label="Threshold")
+        (self.line,) = self.ax.plot(
+            [], [], color="#1f77b4", linewidth=2, label="Risk score"
+        )
+
+        self.ax.axhline(
+            self.threshold,
+            color="red",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"Threshold ({self.threshold:.2f})",
+        )
+
         self.ax.set_title("Risk score theo thời gian")
         self.ax.set_xlabel("Sample index")
-        self.ax.set_ylabel("Risk score")
-        self.ax.set_ylim(0, 1.0)
+        self.ax.set_ylabel("Risk score (P_Warning + P_Fault)")
+        self.ax.set_ylim(0, 1.05)
         self.ax.grid(True, alpha=0.3)
         self.ax.legend(loc="upper right")
 
         right = ttk.Frame(body, width=320)
         right.pack(side="right", fill="y")
         right.grid_columnconfigure(0, weight=1)
-        ttk.Label(right, text="Log", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 4))
-        self.log_box = tk.Text(right, height=30, width=42, state="disabled", wrap="word")
-        self.log_box.pack(fill="both", expand=True)
-
-    def _prepare_model(self):
-        artifact_path = project_dir / "trained_models.pkl"
-        if not artifact_path.exists():
-            raise FileNotFoundError("Không tìm thấy trained_models.pkl. Hãy chạy lại các cell huấn luyện trong demo.ipynb trước khi chạy app.py.")
-
-        with artifact_path.open("rb") as f:
-            payload = pickle.load(f)
-
-        self.model = payload.get("rf_calibrated", payload.get("model"))
-        self.scaler = payload["scaler"]
-        self.feature_names = payload.get("feature_names", [])
-        self.raw_feature_names = payload.get("raw_feature_names", [])
-        self.monitor = RealTimeRiskMonitor(
-            model=self.model,
-            scaler=self.scaler,
-            feature_names=self.feature_names,
-            raw_feature_names=self.raw_feature_names,
-            threshold=payload.get("threshold", 0.5),
-            window_size=10,
+        ttk.Label(
+            right, text="Log", font=("Segoe UI", 12, "bold")
+        ).pack(anchor="w", pady=(0, 4))
+        self.log_box = tk.Text(
+            right, height=30, width=42, state="disabled", wrap="word"
         )
-
-        self.log("Đã tải mô hình Random Forest calibrate từ demo.ipynb.")
+        self.log_box.pack(fill="both", expand=True)
 
     def log(self, message):
         self.log_lines.append(message)
@@ -155,8 +205,21 @@ class LiveMonitorApp:
         sample = read_live_system_metrics()
         result = self.monitor.update(sample)
         if result is not None:
-            risk_score = float(np.clip(float(result["risk_score"]), 0.0, 1.0))
-            state = "Risk" if risk_score >= 0.5 else "Normal"
+            # risk_score là tổng xác suất (P_Warning + P_Fault)
+            risk_score = float(
+                np.clip(float(result["risk_score"]), 0.0, 1.0)
+            )
+
+            # Phân loại trạng thái chuẩn theo Threshold tối ưu (0.54)
+            if risk_score < self.threshold:
+                state = "Normal"
+                color = "#0b6e4f"  # Xanh lá - An toàn
+            elif risk_score < 0.85:
+                state = "Warning (At-risk)"
+                color = "#d97706"  # Cam - Cảnh báo rủi ro
+            else:
+                state = "Fault (Critical)"
+                color = "#dc2626"  # Đỏ - Nguy hiểm cao
 
             self.sample_indices.append(len(self.sample_indices))
             self.risk_scores.append(risk_score)
@@ -171,8 +234,9 @@ class LiveMonitorApp:
 
             ts = time.strftime("%H:%M:%S")
             self.latest_state_var.set(f"State: {state}")
+            self.state_label.configure(foreground=color)
             self.latest_score_var.set(f"Score: {risk_score:.3f}")
-            self.log(f"[{ts}] rf_calibrated={risk_score:.3f} | state={state}")
+            self.log(f"[{ts}] risk_score={risk_score:.3f} | state={state}")
 
         self.root.after(int(self.interval_seconds * 1000), self._tick)
 
