@@ -6,3 +6,6 @@
 Run all in demo.ipynb
 
 Debug app.py
+
+#### Chú ý
+Đây chỉ là file demo.
