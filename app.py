@@ -21,9 +21,6 @@ from realtime_demo import RealTimeRiskMonitor, read_live_system_metrics
 
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, IsolationForest
-from sklearn.linear_model import LogisticRegression
-from sklearn.calibration import CalibratedClassifierCV
 
 
 class LiveMonitorApp:
@@ -101,12 +98,7 @@ class LiveMonitorApp:
         with artifact_path.open("rb") as f:
             payload = pickle.load(f)
 
-        self.model = payload.get("model")
-        self.ensemble_models = {
-            "rf_calibrated": payload.get("rf_calibrated", payload.get("model")),
-            "isolation_forest": payload["isolation_forest"],
-            "logistic_regression": payload["logistic_regression"],
-        }
+        self.model = payload.get("rf_calibrated", payload.get("model"))
         self.scaler = payload["scaler"]
         self.feature_names = payload.get("feature_names", [])
         self.raw_feature_names = payload.get("raw_feature_names", [])
@@ -119,7 +111,7 @@ class LiveMonitorApp:
             window_size=10,
         )
 
-        self.log("Đã tải mô hình huấn luyện sẵn từ demo.ipynb.")
+        self.log("Đã tải mô hình Random Forest calibrate từ demo.ipynb.")
 
     def log(self, message):
         self.log_lines.append(message)
@@ -163,29 +155,11 @@ class LiveMonitorApp:
         sample = read_live_system_metrics()
         result = self.monitor.update(sample)
         if result is not None:
-            rf_score = float(result["risk_score"])
-
-            feature_df = pd.DataFrame([sample], columns=self.raw_feature_names)
-            feature_df = feature_df.reindex(columns=self.feature_names, fill_value=0.0)
-            scaled_df = pd.DataFrame(self.scaler.transform(feature_df), columns=self.feature_names)
-
-            try:
-                iso_pred = self.ensemble_models["isolation_forest"].predict(scaled_df)[0]
-                iso_risk = 1.0 if iso_pred == -1 else 0.0
-            except Exception:
-                iso_risk = 0.0
-
-            try:
-                logit_proba = self.ensemble_models["logistic_regression"].predict_proba(scaled_df)[0]
-                logit_risk = float(logit_proba[1] + logit_proba[2]) if len(logit_proba) >= 3 else float(logit_proba[1])
-            except Exception:
-                logit_risk = 0.0
-
-            ensemble_score = float(np.clip((rf_score + iso_risk + logit_risk) / 3.0, 0.0, 1.0))
-            state = "Risk" if ensemble_score >= 0.5 else "Normal"
+            risk_score = float(np.clip(float(result["risk_score"]), 0.0, 1.0))
+            state = "Risk" if risk_score >= 0.5 else "Normal"
 
             self.sample_indices.append(len(self.sample_indices))
-            self.risk_scores.append(ensemble_score)
+            self.risk_scores.append(risk_score)
             if len(self.sample_indices) > 200:
                 self.sample_indices = self.sample_indices[-200:]
                 self.risk_scores = self.risk_scores[-200:]
@@ -197,8 +171,8 @@ class LiveMonitorApp:
 
             ts = time.strftime("%H:%M:%S")
             self.latest_state_var.set(f"State: {state}")
-            self.latest_score_var.set(f"Score: {ensemble_score:.3f}")
-            self.log(f"[{ts}] rf={rf_score:.3f} | iso={iso_risk:.3f} | logit={logit_risk:.3f} | ensemble={ensemble_score:.3f} | state={state}")
+            self.latest_score_var.set(f"Score: {risk_score:.3f}")
+            self.log(f"[{ts}] rf_calibrated={risk_score:.3f} | state={state}")
 
         self.root.after(int(self.interval_seconds * 1000), self._tick)
 
